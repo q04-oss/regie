@@ -129,6 +129,19 @@ impl IngestionService {
         let recommendation = if self.skip_ai {
             None
         } else {
+            // README isn't persisted — fetch inline for the recommendation
+            // prompt so Claude can see project framing without us reaching
+            // into the GitHub API on every regenerate.
+            let readme_md = self
+                .github
+                .get_file_content(repo, "README.md")
+                .await
+                .ok()
+                .flatten();
+            let readme_excerpt: Option<String> = readme_md
+                .as_deref()
+                .map(|s| s.chars().take(300).collect());
+
             match self
                 .build_recommendation(
                     repo,
@@ -136,6 +149,7 @@ impl IngestionService {
                     &deferred_items,
                     &commits,
                     claude_md.as_deref(),
+                    readme_excerpt.as_deref(),
                 )
                 .await
             {
@@ -185,6 +199,19 @@ impl IngestionService {
             (repo_row.grade, repo_row.claude_md, deferred, commits)
         };
 
+        // README isn't persisted; re-fetch on demand. Same trade-off as the
+        // ingestion path: one GitHub call per regenerate vs. another column
+        // we'd have to keep in sync.
+        let readme_md = self
+            .github
+            .get_file_content(repo, "README.md")
+            .await
+            .ok()
+            .flatten();
+        let readme_excerpt: Option<String> = readme_md
+            .as_deref()
+            .map(|s| s.chars().take(300).collect());
+
         let rec = self
             .build_recommendation(
                 repo,
@@ -192,6 +219,7 @@ impl IngestionService {
                 &deferred,
                 &commits,
                 claude_md.as_deref(),
+                readme_excerpt.as_deref(),
             )
             .await?;
 
@@ -207,14 +235,24 @@ impl IngestionService {
         deferred: &[DeferredItem],
         commits: &[CommitSummary],
         claude_md: Option<&str>,
+        readme: Option<&str>,
     ) -> Result<Recommendation> {
         // Truncate CLAUDE.md to ~500 chars on a UTF-8 char boundary. We
         // collect through chars() to avoid splitting a multi-byte codepoint.
         let excerpt: Option<String> =
             claude_md.map(|s| s.chars().take(500).collect());
-        let grade = grade.unwrap_or("ungraded");
+        // Phrasing Claude reads more naturally than a single "ungraded" token
+        // when the repo has no scorecard history yet.
+        let grade = grade.unwrap_or("not yet scored — no scorecard exists");
         self.anthropic
-            .recommend_next_action(repo, grade, deferred, commits, excerpt.as_deref())
+            .recommend_next_action(
+                repo,
+                grade,
+                deferred,
+                commits,
+                excerpt.as_deref(),
+                readme,
+            )
             .await
     }
 

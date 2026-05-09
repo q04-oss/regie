@@ -63,6 +63,7 @@ impl AnthropicClient {
         deferred_items: &[DeferredItem],
         recent_commits: &[CommitSummary],
         claude_md_context: Option<&str>,
+        readme_context: Option<&str>,
     ) -> Result<Recommendation> {
         let mut prompt = String::new();
         let _ = writeln!(prompt, "Repository: {repo_name}");
@@ -103,6 +104,14 @@ impl AnthropicClient {
         if let Some(ctx) = claude_md_context {
             let _ = writeln!(prompt);
             let _ = writeln!(prompt, "CLAUDE.md context (excerpt):\n{ctx}");
+        }
+
+        if let Some(readme) = readme_context {
+            // Caller has already capped to ~300 chars on a UTF-8 boundary;
+            // slice defensively here in case a future caller skips that.
+            let truncated: String = readme.chars().take(300).collect();
+            let _ = writeln!(prompt);
+            let _ = writeln!(prompt, "README (first 300 chars):\n{truncated}");
         }
 
         let _ = writeln!(prompt);
