@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 
-/// A connected repository tracked by Régie
+/// A connected repository tracked by Régie.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::FromRow))]
 pub struct Repo {
     pub id: String,           // e.g. "q04-oss/box-fraise-platform"
     pub name: String,
@@ -13,8 +14,13 @@ pub struct Repo {
     pub last_ingested_at: Option<DateTime<Utc>>,
 }
 
-/// A single scorecard entry parsed from SCORECARD.md
+/// A single scorecard entry parsed from SCORECARD.md.
+///
+/// The schema column is `entry_date`; the field stays `date` for ergonomic
+/// access. Queries that read this struct must alias the column
+/// (`SELECT entry_date AS date, ...`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::FromRow))]
 pub struct ScorecardEntry {
     pub repo_id: String,
     pub date: chrono::NaiveDate,
@@ -28,8 +34,9 @@ pub struct ScorecardEntry {
     pub product_completeness: f64,
 }
 
-/// A deferred item parsed from HARDENING.md
+/// A deferred item parsed from HARDENING.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::FromRow))]
 pub struct DeferredItem {
     pub repo_id: String,
     pub id: String,
@@ -39,16 +46,19 @@ pub struct DeferredItem {
     pub priority: DeferredItemPriority,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::Type))]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "db", sqlx(type_name = "TEXT", rename_all = "lowercase"))]
 pub enum DeferredItemPriority {
     High,
     Medium,
     Low,
 }
 
-/// A commit with a Claude-generated semantic summary
+/// A commit with a Claude-generated semantic summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::FromRow))]
 pub struct CommitSummary {
     pub repo_id: String,
     pub sha: String,
@@ -59,8 +69,9 @@ pub struct CommitSummary {
     pub files_changed: Option<i32>,
 }
 
-/// A task created in Régie for Claude Code to pick up
+/// A task created in Régie for Claude Code to pick up.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::FromRow))]
 pub struct Task {
     pub id: uuid::Uuid,
     pub repo_id: String,
@@ -71,8 +82,10 @@ pub struct Task {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::Type))]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "db", sqlx(type_name = "TEXT", rename_all = "lowercase"))]
 pub enum TaskStatus {
     Pending,
     InProgress,
@@ -80,8 +93,9 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-/// Claude's recommendation for what to work on next
+/// Claude's recommendation for what to work on next.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "db", derive(sqlx::FromRow))]
 pub struct Recommendation {
     pub repo_id: String,
     pub generated_at: DateTime<Utc>,

@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: regie
+      POSTGRES_PASSWORD: regie
+      POSTGRES_DB: regie
+    # Port 5433 (not 5432) — keeps regie's local DB from clashing with
+    # box-fraise-platform's postgres on the standard port.
+    ports:
+      - "5433:5432"
+    volumes:
+      - regie_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U regie"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  regie_postgres_data:

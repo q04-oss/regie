@@ -3,20 +3,28 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
     routing::get,
     Json, Router,
 };
+use chrono::Utc;
+use regie_shared::types::{
+    CommitSummary, DeferredItem, Repo, ScorecardEntry, Task, TaskStatus,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use uuid::Uuid;
 
+pub mod db;
 pub mod github;
 pub mod ingestion;
 pub mod parsers;
 
 use github::GitHubClient;
-use ingestion::IngestionService;
+use ingestion::{IngestedRepo, IngestionService};
 
 #[derive(Clone)]
 pub struct AppState {
+    pub pool: PgPool,
     pub ingestion: Arc<IngestionService>,
 }
 
@@ -24,15 +32,32 @@ pub async fn run() {
     dotenvy::dotenv().ok();
     let github_token =
         std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set");
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("connect to DATABASE_URL");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("apply migrations");
 
     let github = GitHubClient::new(github_token);
     let state = AppState {
-        ingestion: Arc::new(IngestionService::new(github)),
+        pool: pool.clone(),
+        ingestion: Arc::new(IngestionService::new(github, pool)),
     };
 
     let app = Router::new()
         .route("/health", get(health))
-        .route("/api/repos/{repo_id}/ingest", get(ingest_repo))
+        .route("/api/repos", get(list_repos).post(create_repo))
+        .route("/api/repos/{repo_id}", get(get_repo))
+        .route("/api/repos/{repo_id}/ingest", get(reingest_repo))
+        .route("/api/repos/{repo_id}/scorecard", get(get_scorecard))
+        .route("/api/repos/{repo_id}/deferred", get(get_deferred))
+        .route("/api/repos/{repo_id}/commits", get(get_commits))
+        .route("/api/repos/{repo_id}/tasks", get(list_tasks).post(create_task))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
@@ -46,18 +71,167 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// `repo_id` is colon-separated in the URL (`q04-oss:box-fraise-platform`)
-/// because `/` would split the path. Normalise back to the GitHub form
-/// before calling the ingestion service.
-async fn ingest_repo(
+// ── repo helpers ─────────────────────────────────────────────────────────────
+
+/// `:` is the path-safe separator used in URLs (the path segment can't contain
+/// `/`); the canonical GitHub form is `owner/name`. Rewrite once, on entry.
+fn normalize_repo_id(repo_id: &str) -> String {
+    repo_id.replacen(':', "/", 1)
+}
+
+type ApiResult<T> = Result<T, (StatusCode, String)>;
+
+fn db_err(e: sqlx::Error) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+fn upstream_err(e: anyhow::Error) -> (StatusCode, String) {
+    (StatusCode::BAD_GATEWAY, e.to_string())
+}
+
+// ── list / create ────────────────────────────────────────────────────────────
+
+async fn list_repos(State(state): State<AppState>) -> ApiResult<Json<Vec<Repo>>> {
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    let repos = db::list_repos(&mut conn).await.map_err(db_err)?;
+    Ok(Json(repos))
+}
+
+#[derive(Deserialize)]
+pub struct CreateRepoRequest {
+    pub repo_id: String,
+}
+
+/// POST /api/repos — body `{ "repo_id": "owner/name" }`. Triggers an
+/// ingestion run and returns the bundle (`IngestedRepo`).
+async fn create_repo(
     State(state): State<AppState>,
-    Path(repo_id): Path<String>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let repo = repo_id.replacen(':', "/", 1);
-    state
+    Json(body): Json<CreateRepoRequest>,
+) -> ApiResult<Json<IngestedRepo>> {
+    let repo = body.repo_id;
+    let bundle = state
         .ingestion
         .ingest_repo(&repo)
         .await
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
+        .map_err(upstream_err)?;
+    Ok(Json(bundle))
+}
+
+// ── per-repo reads ───────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct RepoDetail {
+    pub repo: Repo,
+    pub scorecard_entries: Vec<ScorecardEntry>,
+    pub deferred_items: Vec<DeferredItem>,
+}
+
+async fn get_repo(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<RepoDetail>> {
+    let repo = normalize_repo_id(&repo_id);
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    let row = db::get_repo(&mut conn, &repo)
+        .await
+        .map_err(db_err)?
+        .ok_or((StatusCode::NOT_FOUND, format!("repo {repo} not tracked")))?;
+    let scorecard_entries = db::get_scorecard_history(&mut conn, &repo)
+        .await
+        .map_err(db_err)?;
+    let deferred_items = db::get_deferred_items(&mut conn, &repo)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(RepoDetail {
+        repo: row,
+        scorecard_entries,
+        deferred_items,
+    }))
+}
+
+async fn reingest_repo(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<IngestedRepo>> {
+    let repo = normalize_repo_id(&repo_id);
+    let bundle = state
+        .ingestion
+        .ingest_repo(&repo)
+        .await
+        .map_err(upstream_err)?;
+    Ok(Json(bundle))
+}
+
+async fn get_scorecard(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<Vec<ScorecardEntry>>> {
+    let repo = normalize_repo_id(&repo_id);
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    let entries = db::get_scorecard_history(&mut conn, &repo)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(entries))
+}
+
+async fn get_deferred(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<Vec<DeferredItem>>> {
+    let repo = normalize_repo_id(&repo_id);
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    let items = db::get_deferred_items(&mut conn, &repo)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(items))
+}
+
+async fn get_commits(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<Vec<CommitSummary>>> {
+    let repo = normalize_repo_id(&repo_id);
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    let commits = db::get_recent_commits(&mut conn, &repo, 10)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(commits))
+}
+
+// ── tasks ────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    pub prompt: String,
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+    Json(body): Json<CreateTaskRequest>,
+) -> ApiResult<(StatusCode, Json<Task>)> {
+    let repo = normalize_repo_id(&repo_id);
+    let task = Task {
+        id: Uuid::new_v4(),
+        repo_id: repo,
+        title: body.title,
+        prompt: body.prompt,
+        status: TaskStatus::Pending,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    db::insert_task(&mut conn, &task).await.map_err(db_err)?;
+    Ok((StatusCode::CREATED, Json(task)))
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<Vec<Task>>> {
+    let repo = normalize_repo_id(&repo_id);
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    let tasks = db::list_tasks(&mut conn, &repo).await.map_err(db_err)?;
+    Ok(Json(tasks))
 }

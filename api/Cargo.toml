@@ -17,4 +17,5 @@ anyhow = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 base64 = "0.22"
 dotenvy = "0.15"
-regie-shared = { path = "../shared" }
+uuid = { workspace = true }
+regie-shared = { path = "../shared", features = ["db"] }
