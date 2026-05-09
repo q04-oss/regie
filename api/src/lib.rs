@@ -8,10 +8,12 @@ use axum::{
 };
 use chrono::Utc;
 use regie_shared::types::{
-    CommitSummary, DeferredItem, Recommendation, Repo, ScorecardEntry, Task, TaskStatus,
+    CommitSummary, DeferredItem, IngestedRepo, Recommendation, Repo, ScorecardEntry,
+    Task, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 pub mod anthropic;
@@ -22,7 +24,7 @@ pub mod parsers;
 
 use anthropic::AnthropicClient;
 use github::GitHubClient;
-use ingestion::{IngestedRepo, IngestionService};
+use ingestion::IngestionService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -75,6 +77,9 @@ pub async fn run() {
             "/api/repos/{repo_id}/recommendation",
             get(get_recommendation).post(force_recommendation),
         )
+        // TODO: restrict CORS origins in production via ALLOWED_ORIGINS env var
+        // (same pattern as box-fraise-platform).
+        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")

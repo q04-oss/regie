@@ -1,0 +1,7 @@
+[build]
+target = "web/index.html"
+dist = "dist"
+
+[watch]
+watch = ["web/src", "web/index.html", "shared/src"]
+ignore = []

@@ -107,3 +107,17 @@ pub struct Recommendation {
     pub estimated_impact: String,
     pub related_deferred_items: Vec<String>,
 }
+
+/// Wire shape returned by `POST /api/repos` and `GET /api/repos/:id/ingest`.
+/// Kept in `shared` so the Leptos frontend can deserialize it without
+/// reaching into the API crate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestedRepo {
+    pub repo_id: String,
+    pub scorecard_entries: Vec<ScorecardEntry>,
+    pub deferred_items: Vec<DeferredItem>,
+    pub recent_commits: Vec<CommitSummary>,
+    pub claude_md: Option<String>,
+    pub ingested_at: DateTime<Utc>,
+    pub recommendation: Option<Recommendation>,
+}

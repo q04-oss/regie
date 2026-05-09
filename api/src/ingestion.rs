@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use regie_shared::types::{
-    CommitSummary, DeferredItem, Recommendation, Repo, ScorecardEntry,
+    CommitSummary, DeferredItem, IngestedRepo, Recommendation, Repo, ScorecardEntry,
 };
-use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
@@ -11,17 +10,6 @@ use crate::anthropic::AnthropicClient;
 use crate::db;
 use crate::github::GitHubClient;
 use crate::parsers;
-
-#[derive(Debug, Serialize)]
-pub struct IngestedRepo {
-    pub repo_id: String,
-    pub scorecard_entries: Vec<ScorecardEntry>,
-    pub deferred_items: Vec<DeferredItem>,
-    pub recent_commits: Vec<CommitSummary>,
-    pub claude_md: Option<String>,
-    pub ingested_at: DateTime<Utc>,
-    pub recommendation: Option<Recommendation>,
-}
 
 pub struct IngestionService {
     github: GitHubClient,
