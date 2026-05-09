@@ -33,7 +33,12 @@ pub struct AppState {
 }
 
 pub async fn run() {
+    // Try `.env` walking up (works when cwd is the api/ crate dir), then
+    // fall back to api/.env explicitly so `cargo run -p regie-api` from the
+    // workspace root also picks the file up. Either succeeds, neither is
+    // required — env vars set by the shell still win.
     dotenvy::dotenv().ok();
+    dotenvy::from_filename("api/.env").ok();
     let github_token =
         std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set");
     let database_url =
