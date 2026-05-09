@@ -8,17 +8,19 @@ use axum::{
 };
 use chrono::Utc;
 use regie_shared::types::{
-    CommitSummary, DeferredItem, Repo, ScorecardEntry, Task, TaskStatus,
+    CommitSummary, DeferredItem, Recommendation, Repo, ScorecardEntry, Task, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+pub mod anthropic;
 pub mod db;
 pub mod github;
 pub mod ingestion;
 pub mod parsers;
 
+use anthropic::AnthropicClient;
 use github::GitHubClient;
 use ingestion::{IngestedRepo, IngestionService};
 
@@ -34,6 +36,16 @@ pub async fn run() {
         std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set");
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let anthropic_api_key =
+        std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let mut skip_ai = std::env::var("SKIP_AI").unwrap_or_default() == "true";
+
+    if anthropic_api_key.is_empty() {
+        tracing::warn!(
+            "ANTHROPIC_API_KEY not set — disabling AI features (commit summaries + recommendations)",
+        );
+        skip_ai = true;
+    }
 
     let pool = PgPool::connect(&database_url)
         .await
@@ -44,9 +56,10 @@ pub async fn run() {
         .expect("apply migrations");
 
     let github = GitHubClient::new(github_token);
+    let anthropic = AnthropicClient::new(anthropic_api_key);
     let state = AppState {
         pool: pool.clone(),
-        ingestion: Arc::new(IngestionService::new(github, pool)),
+        ingestion: Arc::new(IngestionService::new(github, pool, anthropic, skip_ai)),
     };
 
     let app = Router::new()
@@ -58,6 +71,10 @@ pub async fn run() {
         .route("/api/repos/{repo_id}/deferred", get(get_deferred))
         .route("/api/repos/{repo_id}/commits", get(get_commits))
         .route("/api/repos/{repo_id}/tasks", get(list_tasks).post(create_task))
+        .route(
+            "/api/repos/{repo_id}/recommendation",
+            get(get_recommendation).post(force_recommendation),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
@@ -71,7 +88,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
-// ── repo helpers ─────────────────────────────────────────────────────────────
+// ── helpers ──────────────────────────────────────────────────────────────────
 
 /// `:` is the path-safe separator used in URLs (the path segment can't contain
 /// `/`); the canonical GitHub form is `owner/name`. Rewrite once, on entry.
@@ -102,16 +119,13 @@ pub struct CreateRepoRequest {
     pub repo_id: String,
 }
 
-/// POST /api/repos — body `{ "repo_id": "owner/name" }`. Triggers an
-/// ingestion run and returns the bundle (`IngestedRepo`).
 async fn create_repo(
     State(state): State<AppState>,
     Json(body): Json<CreateRepoRequest>,
 ) -> ApiResult<Json<IngestedRepo>> {
-    let repo = body.repo_id;
     let bundle = state
         .ingestion
-        .ingest_repo(&repo)
+        .ingest_repo(&body.repo_id)
         .await
         .map_err(upstream_err)?;
     Ok(Json(bundle))
@@ -196,6 +210,48 @@ async fn get_commits(
         .await
         .map_err(db_err)?;
     Ok(Json(commits))
+}
+
+// ── recommendation ───────────────────────────────────────────────────────────
+
+async fn get_recommendation(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<Recommendation>> {
+    let repo = normalize_repo_id(&repo_id);
+    let mut conn = state.pool.acquire().await.map_err(db_err)?;
+    if let Some(rec) = db::get_latest_recommendation(&mut conn, &repo)
+        .await
+        .map_err(db_err)?
+    {
+        return Ok(Json(rec));
+    }
+    drop(conn);
+    if state.ingestion.skip_ai {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no recommendation yet (AI disabled)".into(),
+        ));
+    }
+    let rec = state
+        .ingestion
+        .regenerate_recommendation(&repo)
+        .await
+        .map_err(upstream_err)?;
+    Ok(Json(rec))
+}
+
+async fn force_recommendation(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> ApiResult<Json<Recommendation>> {
+    let repo = normalize_repo_id(&repo_id);
+    let rec = state
+        .ingestion
+        .regenerate_recommendation(&repo)
+        .await
+        .map_err(upstream_err)?;
+    Ok(Json(rec))
 }
 
 // ── tasks ────────────────────────────────────────────────────────────────────

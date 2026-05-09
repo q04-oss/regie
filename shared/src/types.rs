@@ -12,6 +12,9 @@ pub struct Repo {
     pub last_commit_sha: Option<String>,
     pub last_commit_at: Option<DateTime<Utc>>,
     pub last_ingested_at: Option<DateTime<Utc>>,
+    /// Cached CLAUDE.md contents fetched at last ingestion. Used by the
+    /// recommendation engine without re-hitting GitHub.
+    pub claude_md: Option<String>,
 }
 
 /// A single scorecard entry parsed from SCORECARD.md.

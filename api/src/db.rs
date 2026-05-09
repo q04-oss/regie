@@ -15,8 +15,8 @@ pub async fn upsert_repo(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO repos \
-         (id, name, grade, test_count, last_commit_sha, last_commit_at, last_ingested_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+         (id, name, grade, test_count, last_commit_sha, last_commit_at, last_ingested_at, claude_md, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
          ON CONFLICT (id) DO UPDATE SET \
              name             = EXCLUDED.name, \
              grade            = EXCLUDED.grade, \
@@ -24,6 +24,7 @@ pub async fn upsert_repo(
              last_commit_sha  = EXCLUDED.last_commit_sha, \
              last_commit_at   = EXCLUDED.last_commit_at, \
              last_ingested_at = EXCLUDED.last_ingested_at, \
+             claude_md        = EXCLUDED.claude_md, \
              updated_at       = now()",
     )
     .bind(&repo.id)
@@ -33,6 +34,7 @@ pub async fn upsert_repo(
     .bind(&repo.last_commit_sha)
     .bind(repo.last_commit_at)
     .bind(repo.last_ingested_at)
+    .bind(&repo.claude_md)
     .execute(conn)
     .await?;
     Ok(())
@@ -43,7 +45,7 @@ pub async fn get_repo(
     repo_id: &str,
 ) -> Result<Option<Repo>, sqlx::Error> {
     sqlx::query_as::<_, Repo>(
-        "SELECT id, name, grade, test_count, last_commit_sha, last_commit_at, last_ingested_at \
+        "SELECT id, name, grade, test_count, last_commit_sha, last_commit_at, last_ingested_at, claude_md \
          FROM repos WHERE id = $1",
     )
     .bind(repo_id)
@@ -53,7 +55,7 @@ pub async fn get_repo(
 
 pub async fn list_repos(conn: &mut PgConnection) -> Result<Vec<Repo>, sqlx::Error> {
     sqlx::query_as::<_, Repo>(
-        "SELECT id, name, grade, test_count, last_commit_sha, last_commit_at, last_ingested_at \
+        "SELECT id, name, grade, test_count, last_commit_sha, last_commit_at, last_ingested_at, claude_md \
          FROM repos ORDER BY id",
     )
     .fetch_all(conn)
@@ -165,15 +167,17 @@ pub async fn upsert_commit_summaries(
     conn: &mut PgConnection,
     commits: &[CommitSummary],
 ) -> Result<(), sqlx::Error> {
-    // DO NOTHING on conflict: we intentionally don't overwrite the
-    // semantic_summary column once Claude has populated it. Re-running
-    // ingestion shouldn't blow away previous AI work.
+    // COALESCE merge on conflict: the existing `semantic_summary` wins if
+    // it's already populated (don't overwrite Claude's work on re-ingest);
+    // an existing NULL gets filled in by the new value if the caller has
+    // one. Other columns are immutable in git, so we don't update them.
     for c in commits {
         sqlx::query(
             "INSERT INTO commit_summaries \
              (sha, repo_id, message, author, committed_at, semantic_summary, files_changed) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) \
-             ON CONFLICT (repo_id, sha) DO NOTHING",
+             ON CONFLICT (repo_id, sha) DO UPDATE SET \
+                 semantic_summary = COALESCE(commit_summaries.semantic_summary, EXCLUDED.semantic_summary)",
         )
         .bind(&c.sha)
         .bind(&c.repo_id)
